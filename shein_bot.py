@@ -15,12 +15,12 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-CHAT_ID = 7855120289   # ✅ MANUAL CHAT ID SET
+CHAT_ID = 7855120289   # ✅ MANUAL CHAT ID
 
 BASE_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961"
 
-PAGES_TO_SCAN = 4          # scan multiple pages
-CHECK_INTERVAL = 8        # seconds (super fast)
+PAGES_TO_SCAN = 4
+CHECK_INTERVAL = 8   # seconds
 
 ALERTS_ON = False
 
@@ -125,7 +125,6 @@ async def stock_job(context: ContextTypes.DEFAULT_TYPE):
                 # ---------- NEW PRODUCT ----------
                 if product_id not in seen_products:
                     seen_products.add(product_id)
-
                     await bot.send_message(
                         chat_id=CHAT_ID,
                         text=(
@@ -147,7 +146,6 @@ async def stock_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if in_stock and product_id not in seen_instock:
                     seen_instock.add(product_id)
-
                     await bot.send_message(
                         chat_id=CHAT_ID,
                         text=(
@@ -163,9 +161,9 @@ async def stock_job(context: ContextTypes.DEFAULT_TYPE):
         logging.exception("Stock job error")
         await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Scanner error: {e}")
 
-# ================== MAIN ==================
+# ================== MAIN (CRASH-FREE) ==================
 
-async def main():
+def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN not set in environment")
 
@@ -174,13 +172,12 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # JobQueue - super fast repeating job
     app.job_queue.run_repeating(stock_job, interval=CHECK_INTERVAL, first=5)
 
     print("🚀 Shein Verse PRO FAST Bot started")
 
-    await app.run_polling()
+    # ✅ CORRECT for Railway + PTB v20+
+    app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
