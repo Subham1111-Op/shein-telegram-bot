@@ -19,8 +19,8 @@ CHAT_ID = 7855120289   # ✅ MANUAL CHAT ID
 
 BASE_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961"
 
-PAGES_TO_SCAN = 4
-CHECK_INTERVAL = 8   # seconds (super fast)
+PAGES_TO_SCAN = 5      # ✅ MORE COVERAGE
+CHECK_INTERVAL = 10   # ✅ MORE STABLE
 
 ALERTS_ON = False
 
