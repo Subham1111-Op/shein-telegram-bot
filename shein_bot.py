@@ -14,7 +14,7 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")   # Railway Variables
 CHAT_ID = 7855120289   # 👈 APNA REAL CHAT ID
 
-CHECK_INTERVAL = 12   # seconds
+CHECK_INTERVAL = 8    # SUPER FAST (Railway pe risky)
 PAGES_TO_SCAN = 2
 
 ALERTS_ON = False
@@ -67,7 +67,29 @@ async def fetch_page(session, page):
     except:
         return {}
 
-# ===== JOB QUEUE STOCK CHECKER (SAFE) =====
+# 🔥 SIZE / VARIANT LEVEL REAL STOCK CHECK
+async def fetch_product_detail_has_stock(session, goods_id):
+    url = f"https://www.sheinindia.in/api/product/detail?goods_id={goods_id}"
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+        "Referer": "https://www.sheinindia.in/"
+    }
+    try:
+        async with session.get(url, headers=headers, timeout=10) as resp:
+            data = await resp.json()
+
+            skus = data.get("info", {}).get("skus", [])
+            for sku in skus:
+                qty = sku.get("stock", 0)
+                if qty and qty > 0:
+                    return True   # kisi bhi size me stock
+
+            return False
+    except:
+        return False
+
+# ===== JOB QUEUE – ALL TIME FAST SCAN =====
 
 async def stock_job(context: ContextTypes.DEFAULT_TYPE):
     global ALERTS_ON
@@ -88,27 +110,39 @@ async def stock_job(context: ContextTypes.DEFAULT_TYPE):
             try:
                 pid = str(p.get("goods_id"))
                 name = p.get("goods_name")
-                stock = p.get("stock", 0)
                 price = p.get("salePrice", {}).get("amount", "")
 
-                if stock and stock > 0 and pid not in SEEN_PRODUCTS:
-                    SEEN_PRODUCTS.add(pid)
-                    save_seen()
+                is_new = pid not in SEEN_PRODUCTS
+
+                # 🔥 REAL SIZE LEVEL STOCK CHECK
+                has_variant_stock = await fetch_product_detail_has_stock(session, pid)
+
+                # 🔔 ALERT CONDITIONS
+                if is_new or has_variant_stock:
+
+                    if is_new:
+                        SEEN_PRODUCTS.add(pid)
+                        save_seen()
 
                     link = build_product_link(p)
 
+                    if has_variant_stock:
+                        alert_type = "🔥 IN-STOCK (SIZE AVAILABLE)"
+                    else:
+                        alert_type = "🆕 NEW DROP"
+
                     msg = (
-                        f"🔥 IN STOCK ALERT!\n\n"
+                        f"{alert_type} ALERT!\n\n"
                         f"🛍 {name}\n"
-                        f"💰 Price: {price}\n"
-                        f"📦 Stock: {stock}\n\n"
-                        f"🔗 Buy Now:\n{link}"
+                        f"💰 Price: {price}\n\n"
+                        f"🔗 Open Product:\n{link}"
                     )
 
                     await context.application.bot.send_message(
                         chat_id=CHAT_ID,
                         text=msg
                     )
+
             except:
                 continue
 
@@ -122,7 +156,7 @@ async def start(update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await update.message.reply_text(
-        "🤖 Shein Verse PRO Bot Ready!\n\nChoose option:",
+        "🤖 Shein Verse PRO FAST Bot Ready!\n\nChoose option:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -134,7 +168,7 @@ async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "on":
         ALERTS_ON = True
-        await query.edit_message_text("🟢 Stock Alerts TURNED ON!")
+        await query.edit_message_text("🟢 SUPER FAST Stock Alerts TURNED ON!")
 
     elif query.data == "off":
         ALERTS_ON = False
@@ -148,7 +182,7 @@ async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 Bot Status:\n\nStatus: {status}\nStock Alerts: {alerts}\nSeen Items: {len(SEEN_PRODUCTS)}"
         )
 
-# ===== Main (RAILWAY + PTB OFFICIAL SAFE WAY) =====
+# ===== Main =====
 
 def main():
     if not BOT_TOKEN:
@@ -162,10 +196,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # ✅ SAFE BACKGROUND LOOP (NO ASYNCIO CRASH)
-    app.job_queue.run_repeating(stock_job, interval=CHECK_INTERVAL, first=10)
+    # ✅ ALL TIME FAST BACKGROUND SCAN
+    app.job_queue.run_repeating(stock_job, interval=CHECK_INTERVAL, first=5)
 
-    print("🚀 Shein Verse PRO Bot started (JOB QUEUE MODE)...")
+    print("🚀 Shein Verse PRO FAST Bot started (VARIANT + NEW DROP MODE)...")
     app.run_polling()
 
 if __name__ == "__main__":
