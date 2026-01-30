@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 # ========== CONFIG ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")   # Railway Variables se aayega
-CHAT_ID = 7855120289  # 👈 APNA REAL CHAT ID
+CHAT_ID = 7855120289   # 👈 APNA REAL CHAT ID
 
 CHECK_INTERVAL = 12   # free hosting friendly
 PAGES_TO_SCAN = 2
@@ -142,9 +142,9 @@ async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 Bot Status:\n\nStatus: {status}\nStock Alerts: {alerts}\nSeen Items: {len(SEEN_PRODUCTS)}"
         )
 
-# ===== Main =====
+# ===== Main (ASYNC SAFE FOR RAILWAY) =====
 
-def main():
+async def main():
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN not set in environment variables!")
         return
@@ -154,11 +154,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(stock_checker(app))
+    asyncio.create_task(stock_checker(app))
 
     print("🚀 Shein Verse PRO Bot started...")
-    app.run_polling()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
