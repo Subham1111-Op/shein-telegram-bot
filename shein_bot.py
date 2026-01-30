@@ -1,7 +1,8 @@
-import aiohttp
-import random
-import json
 import os
+import aiohttp
+import logging
+from typing import Set
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,197 +11,176 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ========== CONFIG ==========
-BOT_TOKEN = os.getenv("BOT_TOKEN")   # Railway Variables
-CHAT_ID = 7855120289   # 👈 APNA REAL CHAT ID
+# ================== CONFIG ==================
 
-CHECK_INTERVAL = 8    # SUPER FAST (Railway pe risky)
-PAGES_TO_SCAN = 2
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+CHAT_ID = 7855120289   # ✅ MANUAL CHAT ID SET
+
+BASE_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961"
+
+PAGES_TO_SCAN = 4          # scan multiple pages
+CHECK_INTERVAL = 8        # seconds (super fast)
 
 ALERTS_ON = False
-BOT_ALIVE = True
 
-SEEN_FILE = "seen_products.json"
-SEEN_PRODUCTS = set()
+seen_products: Set[str] = set()
+seen_instock: Set[str] = set()
 
-BASE_API = "https://www.sheinindia.in/api/category/sverse-5939-37961?fields=SITE&pageSize=40&format=json&query=%3Arelevance%3Agenderfilter%3AMen&facets=genderfilter%3AMen&platform=Desktop&currentPage={page}"
+logging.basicConfig(level=logging.INFO)
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Mozilla/5.0 (Linux; Android 13)",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)",
-]
+# ================== UI ==================
 
-# ============================
+def build_menu():
+    keyboard = [
+        [InlineKeyboardButton("🟢 Stock Alerts ON", callback_data="on")],
+        [InlineKeyboardButton("🔴 Stock Alerts OFF", callback_data="off")],
+        [InlineKeyboardButton("📡 Bot Status", callback_data="status")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-def load_seen():
-    global SEEN_PRODUCTS
-    if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r") as f:
-                SEEN_PRODUCTS = set(json.load(f))
-        except:
-            SEEN_PRODUCTS = set()
+# ================== API ==================
 
-def save_seen():
-    try:
-        with open(SEEN_FILE, "w") as f:
-            json.dump(list(SEEN_PRODUCTS), f)
-    except:
-        pass
-
-def build_product_link(p):
-    goods_id = p.get("goods_id")
-    goods_sn = p.get("goods_sn", "")
-    return f"https://www.sheinindia.in/{goods_sn}-p-{goods_id}.html"
-
-async def fetch_page(session, page):
-    url = BASE_API.format(page=page)
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json",
-        "Referer": "https://www.sheinindia.in/"
+async def fetch_page(session, page: int):
+    params = {
+        "fields": "SITE",
+        "currentPage": page,
+        "pageSize": 40,
+        "format": "json",
+        "query": ":relevance:genderfilter:Men",
+        "facets": "genderfilter:Men",
+        "platform": "Desktop",
     }
-    try:
-        async with session.get(url, headers=headers, timeout=10) as resp:
-            return await resp.json()
-    except:
-        return {}
+    async with session.get(BASE_URL, params=params, timeout=20) as resp:
+        return await resp.json()
 
-# 🔥 SIZE / VARIANT LEVEL REAL STOCK CHECK
-async def fetch_product_detail_has_stock(session, goods_id):
-    url = f"https://www.sheinindia.in/api/product/detail?goods_id={goods_id}"
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json",
-        "Referer": "https://www.sheinindia.in/"
-    }
-    try:
-        async with session.get(url, headers=headers, timeout=10) as resp:
-            data = await resp.json()
+# ================== BOT COMMANDS ==================
 
-            skus = data.get("info", {}).get("skus", [])
-            for sku in skus:
-                qty = sku.get("stock", 0)
-                if qty and qty > 0:
-                    return True   # kisi bhi size me stock
+async def start(update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Shein Verse PRO Bot Ready!\nChoose option:",
+        reply_markup=build_menu()
+    )
 
-            return False
-    except:
-        return False
+async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    global ALERTS_ON
+    query = update.callback_query
+    await query.answer()
 
-# ===== JOB QUEUE – ALL TIME FAST SCAN =====
+    if query.data == "on":
+        ALERTS_ON = True
+        await query.edit_message_text(
+            "🟢 Stock Alerts TURNED ON!",
+            reply_markup=build_menu()
+        )
+
+    elif query.data == "off":
+        ALERTS_ON = False
+        await query.edit_message_text(
+            "🔴 Stock Alerts TURNED OFF!",
+            reply_markup=build_menu()
+        )
+
+    elif query.data == "status":
+        await query.edit_message_text(
+            f"🤖 Bot Status:\n"
+            f"Status: 🟢 ALIVE & RUNNING\n"
+            f"Stock Alerts: {'ON' if ALERTS_ON else 'OFF'}\n"
+            f"Seen Items: {len(seen_products)}",
+            reply_markup=build_menu()
+        )
+
+# ================== STOCK SCANNER ==================
 
 async def stock_job(context: ContextTypes.DEFAULT_TYPE):
-    global ALERTS_ON
+    global ALERTS_ON, seen_products, seen_instock
 
     if not ALERTS_ON:
         return
+
+    bot = context.application.bot
+
+    # 🔧 DEBUG PING (TEMPORARY)
+    await bot.send_message(
+        chat_id=CHAT_ID,
+        text="🔄 Scanning Shein Verse Men section..."
+    )
 
     if not hasattr(context.application, "http_session"):
         context.application.http_session = aiohttp.ClientSession()
 
     session = context.application.http_session
 
-    for page in range(PAGES_TO_SCAN):
-        data = await fetch_page(session, page)
-        products = data.get("info", {}).get("products", [])
+    try:
+        for page in range(PAGES_TO_SCAN):
+            data = await fetch_page(session, page)
+            products = data.get("info", {}).get("products", [])
 
-        for p in products:
-            try:
-                pid = str(p.get("goods_id"))
-                name = p.get("goods_name")
-                price = p.get("salePrice", {}).get("amount", "")
+            for p in products:
+                product_id = str(p.get("goods_id"))
+                name = p.get("goods_name", "Unknown")
+                price = p.get("salePrice", "")
+                url = p.get("goods_url", "")
 
-                is_new = pid not in SEEN_PRODUCTS
+                # ---------- NEW PRODUCT ----------
+                if product_id not in seen_products:
+                    seen_products.add(product_id)
 
-                # 🔥 REAL SIZE LEVEL STOCK CHECK
-                has_variant_stock = await fetch_product_detail_has_stock(session, pid)
-
-                # 🔔 ALERT CONDITIONS
-                if is_new or has_variant_stock:
-
-                    if is_new:
-                        SEEN_PRODUCTS.add(pid)
-                        save_seen()
-
-                    link = build_product_link(p)
-
-                    if has_variant_stock:
-                        alert_type = "🔥 IN-STOCK (SIZE AVAILABLE)"
-                    else:
-                        alert_type = "🆕 NEW DROP"
-
-                    msg = (
-                        f"{alert_type} ALERT!\n\n"
-                        f"🛍 {name}\n"
-                        f"💰 Price: {price}\n\n"
-                        f"🔗 Open Product:\n{link}"
-                    )
-
-                    await context.application.bot.send_message(
+                    await bot.send_message(
                         chat_id=CHAT_ID,
-                        text=msg
+                        text=(
+                            "🆕 NEW PRODUCT ADDED!\n\n"
+                            f"👕 {name}\n"
+                            f"💰 {price}\n"
+                            f"🔗 {url}"
+                        )
                     )
 
-            except:
-                continue
+                # ---------- STOCK CHECK ----------
+                in_stock = False
 
-# ===== Telegram Handlers =====
+                if isinstance(p.get("stock"), int) and p.get("stock", 0) > 0:
+                    in_stock = True
 
-async def start(update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🟢 Stock Alerts ON", callback_data="on")],
-        [InlineKeyboardButton("🔴 Stock Alerts OFF", callback_data="off")],
-        [InlineKeyboardButton("📡 Bot Status", callback_data="status")]
-    ]
+                if p.get("isSoldOut") is False:
+                    in_stock = True
 
-    await update.message.reply_text(
-        "🤖 Shein Verse PRO FAST Bot Ready!\n\nChoose option:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+                if in_stock and product_id not in seen_instock:
+                    seen_instock.add(product_id)
 
-async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    global ALERTS_ON
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=(
+                            "🔥 STOCK AVAILABLE!\n\n"
+                            f"👕 {name}\n"
+                            f"💰 {price}\n"
+                            f"🔗 {url}\n\n"
+                            "⚡ ANY SIZE STOCK DETECTED!"
+                        )
+                    )
 
-    query = update.callback_query
-    await query.answer()
+    except Exception as e:
+        logging.exception("Stock job error")
+        await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Scanner error: {e}")
 
-    if query.data == "on":
-        ALERTS_ON = True
-        await query.edit_message_text("🟢 SUPER FAST Stock Alerts TURNED ON!")
+# ================== MAIN ==================
 
-    elif query.data == "off":
-        ALERTS_ON = False
-        await query.edit_message_text("🔴 Stock Alerts TURNED OFF!")
-
-    elif query.data == "status":
-        status = "🟢 ALIVE & RUNNING" if BOT_ALIVE else "🔴 DOWN"
-        alerts = "ON" if ALERTS_ON else "OFF"
-
-        await query.edit_message_text(
-            f"🤖 Bot Status:\n\nStatus: {status}\nStock Alerts: {alerts}\nSeen Items: {len(SEEN_PRODUCTS)}"
-        )
-
-# ===== Main =====
-
-def main():
+async def main():
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN not set in environment variables!")
-        return
-
-    load_seen()
+        raise RuntimeError("BOT_TOKEN not set in environment")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # ✅ ALL TIME FAST BACKGROUND SCAN
+    # JobQueue - super fast repeating job
     app.job_queue.run_repeating(stock_job, interval=CHECK_INTERVAL, first=5)
 
-    print("🚀 Shein Verse PRO FAST Bot started (VARIANT + NEW DROP MODE)...")
-    app.run_polling()
+    print("🚀 Shein Verse PRO FAST Bot started")
+
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
