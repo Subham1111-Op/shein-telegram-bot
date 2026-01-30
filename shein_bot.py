@@ -20,7 +20,7 @@ CHAT_ID = 7855120289   # ✅ MANUAL CHAT ID
 BASE_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961"
 
 PAGES_TO_SCAN = 4
-CHECK_INTERVAL = 8   # seconds
+CHECK_INTERVAL = 8   # seconds (super fast)
 
 ALERTS_ON = False
 
@@ -58,7 +58,7 @@ async def fetch_page(session, page: int):
 
 async def start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Shein Verse PRO Bot Ready!\nChoose option:",
+        "🤖 Shein Verse PRO FAST Bot Ready!\nChoose option:",
         reply_markup=build_menu()
     )
 
@@ -70,7 +70,7 @@ async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "on":
         ALERTS_ON = True
         await query.edit_message_text(
-            "🟢 Stock Alerts TURNED ON!",
+            "🟢 SUPER FAST Stock Alerts TURNED ON!",
             reply_markup=build_menu()
         )
 
@@ -99,12 +99,6 @@ async def stock_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     bot = context.application.bot
-
-    # 🔧 DEBUG PING (TEMPORARY)
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text="🔄 Scanning Shein Verse Men section..."
-    )
 
     if not hasattr(context.application, "http_session"):
         context.application.http_session = aiohttp.ClientSession()
@@ -135,7 +129,7 @@ async def stock_job(context: ContextTypes.DEFAULT_TYPE):
                         )
                     )
 
-                # ---------- STOCK CHECK ----------
+                # ---------- STOCK CHECK (ANY SIZE) ----------
                 in_stock = False
 
                 if isinstance(p.get("stock"), int) and p.get("stock", 0) > 0:
@@ -161,7 +155,7 @@ async def stock_job(context: ContextTypes.DEFAULT_TYPE):
         logging.exception("Stock job error")
         await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Scanner error: {e}")
 
-# ================== MAIN (CRASH-FREE) ==================
+# ================== MAIN (STABLE) ==================
 
 def main():
     if not BOT_TOKEN:
@@ -176,7 +170,6 @@ def main():
 
     print("🚀 Shein Verse PRO FAST Bot started")
 
-    # ✅ CORRECT for Railway + PTB v20+
     app.run_polling()
 
 if __name__ == "__main__":
