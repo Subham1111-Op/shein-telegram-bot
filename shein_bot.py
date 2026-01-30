@@ -1,16 +1,20 @@
-import asyncio
 import aiohttp
 import random
 import json
 import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
 # ========== CONFIG ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")   # Railway Variables
 CHAT_ID = 7855120289   # 👈 APNA REAL CHAT ID
 
-CHECK_INTERVAL = 12
+CHECK_INTERVAL = 12   # seconds
 PAGES_TO_SCAN = 2
 
 ALERTS_ON = False
@@ -63,51 +67,50 @@ async def fetch_page(session, page):
     except:
         return {}
 
-async def stock_checker(application):
+# ===== JOB QUEUE STOCK CHECKER (SAFE) =====
+
+async def stock_job(context: ContextTypes.DEFAULT_TYPE):
     global ALERTS_ON
 
-    load_seen()
-    print("Seen products loaded:", len(SEEN_PRODUCTS))
+    if not ALERTS_ON:
+        return
 
-    async with aiohttp.ClientSession() as session:
-        while True:
-            if ALERTS_ON:
-                tasks = [fetch_page(session, p) for p in range(PAGES_TO_SCAN)]
-                results = await asyncio.gather(*tasks)
+    if not hasattr(context.application, "http_session"):
+        context.application.http_session = aiohttp.ClientSession()
 
-                for data in results:
-                    products = data.get("info", {}).get("products", [])
+    session = context.application.http_session
 
-                    for p in products:
-                        try:
-                            pid = str(p.get("goods_id"))
-                            name = p.get("goods_name")
-                            stock = p.get("stock", 0)
-                            price = p.get("salePrice", {}).get("amount", "")
+    for page in range(PAGES_TO_SCAN):
+        data = await fetch_page(session, page)
+        products = data.get("info", {}).get("products", [])
 
-                            if stock and stock > 0 and pid not in SEEN_PRODUCTS:
-                                SEEN_PRODUCTS.add(pid)
-                                save_seen()
+        for p in products:
+            try:
+                pid = str(p.get("goods_id"))
+                name = p.get("goods_name")
+                stock = p.get("stock", 0)
+                price = p.get("salePrice", {}).get("amount", "")
 
-                                link = build_product_link(p)
+                if stock and stock > 0 and pid not in SEEN_PRODUCTS:
+                    SEEN_PRODUCTS.add(pid)
+                    save_seen()
 
-                                msg = (
-                                    f"🔥 IN STOCK ALERT!\n\n"
-                                    f"🛍 {name}\n"
-                                    f"💰 Price: {price}\n"
-                                    f"📦 Stock: {stock}\n\n"
-                                    f"🔗 Buy Now:\n{link}"
-                                )
+                    link = build_product_link(p)
 
-                                await application.bot.send_message(
-                                    chat_id=CHAT_ID,
-                                    text=msg
-                                )
+                    msg = (
+                        f"🔥 IN STOCK ALERT!\n\n"
+                        f"🛍 {name}\n"
+                        f"💰 Price: {price}\n"
+                        f"📦 Stock: {stock}\n\n"
+                        f"🔗 Buy Now:\n{link}"
+                    )
 
-                        except:
-                            continue
-
-            await asyncio.sleep(CHECK_INTERVAL)
+                    await context.application.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=msg
+                    )
+            except:
+                continue
 
 # ===== Telegram Handlers =====
 
@@ -145,22 +148,24 @@ async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 Bot Status:\n\nStatus: {status}\nStock Alerts: {alerts}\nSeen Items: {len(SEEN_PRODUCTS)}"
         )
 
-# ===== Main (PTB SAFE — NO asyncio.run) =====
+# ===== Main (RAILWAY + PTB OFFICIAL SAFE WAY) =====
 
 def main():
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN not set in environment variables!")
         return
 
+    load_seen()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # 👇 Background task attached to PTB loop (SAFE)
-    app.post_init = lambda application: application.create_task(stock_checker(application))
+    # ✅ SAFE BACKGROUND LOOP (NO ASYNCIO CRASH)
+    app.job_queue.run_repeating(stock_job, interval=CHECK_INTERVAL, first=10)
 
-    print("🚀 Shein Verse PRO Bot started...")
+    print("🚀 Shein Verse PRO Bot started (JOB QUEUE MODE)...")
     app.run_polling()
 
 if __name__ == "__main__":
