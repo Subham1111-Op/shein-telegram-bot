@@ -1,19 +1,23 @@
 import os
-import asyncio
 import logging
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
-# ================== ENV ==================
+# ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
 if not BOT_TOKEN or not CHAT_ID:
     raise RuntimeError("BOT_TOKEN / CHAT_ID missing")
 
-# ================== CONFIG ==================
-CHECK_INTERVAL = 5  # SUPER FAST (seconds)
+# ================= CONFIG =================
+CHECK_INTERVAL = 5  # seconds (super fast)
 
 SHEIN_API = (
     "https://www.sheinindia.in/api/category/"
@@ -22,106 +26,82 @@ SHEIN_API = (
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13)",
+    "User-Agent": "Mozilla/5.0 (Android)",
     "Accept": "application/json",
     "Referer": "https://www.sheinindia.in/",
 }
 
-# ================== STATE ==================
-seen_keys = set()     # block duplicates (item+signal)
-last_alerts = []      # show last alerts in button
-client_timeout = httpx.Timeout(10.0)
+# ================= STATE =================
+seen_items = set()
+last_alerts = []
 
-# ================== LOG ==================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+logging.basicConfig(level=logging.INFO)
 
-# ================== BUTTONS ==================
+# ================= BUTTONS =================
 def keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Check Coupon Stock", callback_data="check")],
-        [InlineKeyboardButton("📦 Last Alerts", callback_data="last"),
-         InlineKeyboardButton("⚙️ Status", callback_data="status")]
-    ])
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔍 Check Now", callback_data="check")],
+            [
+                InlineKeyboardButton("📦 Last Alerts", callback_data="last"),
+                InlineKeyboardButton("⚙️ Status", callback_data="status"),
+            ],
+        ]
+    )
 
-# ================== TELEGRAM ==================
+# ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔥 *SHEIN VERSE MEN – COUPON BOT*\n\n"
-        "✅ Coupon-applied items only\n"
-        "⚡ Ultra-fast scanning\n"
-        "👕 MEN section only\n\n"
-        "Buttons use karo 👇",
+        "✅ Only MEN items\n"
+        "🎟️ Coupon / price-drop detect\n"
+        "⚡ Super fast alerts\n\n"
+        "Use buttons 👇",
         parse_mode="Markdown",
-        reply_markup=keyboard()
+        reply_markup=keyboard(),
     )
 
+# ================= BUTTON HANDLER =================
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
     if q.data == "check":
-        await q.edit_message_text(
-            "🔍 Checking coupon-applied stock now…",
-            reply_markup=keyboard()
-        )
-        await check_coupon_stock(context)
+        await q.edit_message_text("🔍 Checking stock…", reply_markup=keyboard())
+        await check_stock(context)
 
     elif q.data == "last":
-        txt = "📦 *No alerts yet*" if not last_alerts else "📦 *Last Alerts*\n\n" + "\n".join(last_alerts[-5:])
-        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=keyboard())
+        text = "📦 *No alerts yet*"
+        if last_alerts:
+            text = "📦 *Last Alerts*\n\n" + "\n".join(last_alerts[-5:])
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard())
 
     elif q.data == "status":
         await q.edit_message_text(
-            f"⚙️ *Status*\n\n"
+            f"⚙️ *Bot Status*\n\n"
             f"🟢 Running\n"
             f"⏱ Interval: {CHECK_INTERVAL}s\n"
-            f"👕 MEN only\n"
-            f"📦 Tracked alerts: {len(seen_keys)}",
+            f"📦 Alerts sent: {len(seen_items)}",
             parse_mode="Markdown",
-            reply_markup=keyboard()
+            reply_markup=keyboard(),
         )
 
-# ================== COUPON DETECTION ==================
-def has_coupon_signal(p: dict) -> bool:
-    """
-    Multi-signal coupon detection:
-    1) Explicit coupon flags/labels (if present)
-    2) Promo labels containing 'coupon'
-    3) Price drop vs original/list price (heuristic)
-    """
-    # 1) Explicit flags (varies by payload)
-    for k in ("couponFlag", "hasCoupon", "isCoupon"):
-        if p.get(k) is True:
-            return True
-
-    # 2) Promo / tags / labels text
-    for field in ("promoLabel", "promotionLabel", "tags", "labelList"):
-        val = p.get(field)
-        if isinstance(val, str) and "coupon" in val.lower():
-            return True
-        if isinstance(val, list):
-            if any(isinstance(x, str) and "coupon" in x.lower() for x in val):
-                return True
-
-    # 3) Price heuristic (sale < original/list)
-    sp = p.get("salePrice") or p.get("sale_price")
-    op = p.get("originalPrice") or p.get("listPrice") or p.get("original_price")
+# ================= COUPON LOGIC =================
+def has_coupon(p: dict) -> bool:
+    sp = p.get("salePrice")
+    op = p.get("originalPrice") or p.get("listPrice")
     try:
-        if sp is not None and op is not None and float(sp) < float(op):
-            return True
+        return sp and op and float(sp) < float(op)
     except Exception:
-        pass
+        return False
 
-    return False
-
-# ================== STOCK CHECK ==================
-async def check_coupon_stock(context: ContextTypes.DEFAULT_TYPE):
+# ================= STOCK CHECK =================
+async def check_stock(context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=client_timeout) as client:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=10) as client:
             r = await client.get(SHEIN_API)
 
         if r.status_code != 200:
-            logging.warning(f"Shein API error {r.status_code}")
             return
 
         products = r.json().get("info", {}).get("products", [])
@@ -133,22 +113,20 @@ async def check_coupon_stock(context: ContextTypes.DEFAULT_TYPE):
             if not pid or stock <= 0:
                 continue
 
-            if not has_coupon_signal(p):
-                continue  # ONLY coupon-applied
-
-            # build a strong duplicate key
-            key = f"{pid}-coupon"
-            if key in seen_keys:
+            if not has_coupon(p):
                 continue
 
-            seen_keys.add(key)
+            if pid in seen_items:
+                continue
+
+            seen_items.add(pid)
 
             name = p.get("goods_name", "Men Item")
             price = p.get("salePrice", "")
             link = "https://www.sheinindia.in/" + p.get("goods_url", "")
 
             msg = (
-                "🎟️ *COUPON APPLIED – MEN ITEM*\n\n"
+                "🎟️ *COUPON ITEM LIVE*\n\n"
                 f"👕 {name}\n"
                 f"💰 {price}\n"
                 f"📦 In Stock\n"
@@ -156,30 +134,28 @@ async def check_coupon_stock(context: ContextTypes.DEFAULT_TYPE):
             )
 
             last_alerts.append(f"• {name}")
-            await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+            await context.bot.send_message(
+                chat_id=CHAT_ID, text=msg, parse_mode="Markdown"
+            )
 
     except Exception as e:
-        logging.error(f"Coupon stock error: {e}")
+        logging.error(f"Stock error: {e}")
 
-# ================== AUTO LOOP ==================
-async def auto_loop(app: Application):
-    while True:
-        await check_coupon_stock(app.bot_data["ctx"])
-        await asyncio.sleep(CHECK_INTERVAL)
+# ================= AUTO JOB =================
+async def auto_job(context: ContextTypes.DEFAULT_TYPE):
+    await check_stock(context)
 
-# ================== MAIN ==================
-async def main():
+# ================= MAIN =================
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
 
-    app.bot_data["ctx"] = app
+    app.job_queue.run_repeating(auto_job, interval=CHECK_INTERVAL, first=3)
 
-    asyncio.create_task(auto_loop(app))
-
-    logging.info("🚀 Coupon bot started (super fast, Railway safe)")
-    await app.run_polling(drop_pending_updates=True)
+    logging.info("✅ Bot running safely (Railway compatible)")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
