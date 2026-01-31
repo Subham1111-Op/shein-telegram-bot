@@ -1,17 +1,8 @@
 import os
 import logging
 import requests
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # ================= ENV =================
@@ -26,57 +17,63 @@ CHAT_ID = int(CHAT_ID)
 
 # ================= CONFIG =================
 
-CHECK_INTERVAL = 10  # seconds (fast)
+CHECK_INTERVAL = 10
 
-MEN_API = (
-    "https://www.sheinindia.in/api/category/sverse-5939-37961"
-    "?fields=SITE&currentPage=0&pageSize=40&format=json&query=:relevance"
-)
+MEN_API = "https://www.sheinindia.in/api/category/sverse-5939-37961"
+
+session = requests.Session()
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Referer": "https://www.sheinindia.in/",
+    "Origin": "https://www.sheinindia.in",
+}
+
+PARAMS = {
+    "fields": "SITE",
+    "currentPage": 0,
+    "pageSize": 40,
+    "format": "json",
+    "query": ":relevance",
 }
 
 # ================= STATE =================
 
 alerts_enabled = True
-seen_stock = {}  # item_id -> set(size_ids)
+seen_stock = {}
 
 # ================= LOG =================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+logging.basicConfig(level=logging.INFO)
 
 # ================= KEYBOARD =================
 
-def main_keyboard():
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("🟢 Stock Alerts ON", callback_data="on"),
-                InlineKeyboardButton("🔴 Stock Alerts OFF", callback_data="off"),
-            ],
-            [
-                InlineKeyboardButton("📊 Bot Status", callback_data="status"),
-            ],
-        ]
-    )
+def keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Alerts ON", callback_data="on"),
+         InlineKeyboardButton("🔴 Alerts OFF", callback_data="off")],
+        [InlineKeyboardButton("📊 Bot Status", callback_data="status")]
+    ])
 
-# ================= API =================
+# ================= FETCH =================
 
 def fetch_products():
     try:
-        r = requests.get(MEN_API, headers=HEADERS, timeout=15)
+        r = session.get(
+            MEN_API,
+            headers=HEADERS,
+            params=PARAMS,
+            timeout=20
+        )
         r.raise_for_status()
         return r.json().get("info", {}).get("products", [])
     except Exception as e:
-        logging.error(f"Fetch error: {e}")
+        logging.error(f"Shein fetch failed: {e}")
         return []
 
-# ================= STOCK CHECK =================
+# ================= STOCK JOB =================
 
 def stock_job(app: Application):
     global seen_stock
@@ -99,25 +96,17 @@ def stock_job(app: Application):
             seen_stock[item_id] = set()
 
         for sku in skus:
-            size_id = sku.get("sku_id")
+            sku_id = sku.get("sku_id")
             stock = sku.get("stock", 0)
 
-            if stock > 0 and size_id not in seen_stock[item_id]:
-                seen_stock[item_id].add(size_id)
+            if stock > 0 and sku_id not in seen_stock[item_id]:
+                seen_stock[item_id].add(sku_id)
 
                 link = f"https://www.sheinindia.in{url}"
 
-                text = (
-                    "🔥 *STOCK AVAILABLE*\n\n"
-                    f"*Item:* {name}\n"
-                    f"*Size:* Available\n"
-                    f"*Link:* {link}"
-                )
-
                 app.bot.send_message(
                     chat_id=CHAT_ID,
-                    text=text,
-                    parse_mode="Markdown",
+                    text=f"🔥 STOCK AVAILABLE\n\n{name}\n\n{link}",
                     disable_web_page_preview=False,
                 )
 
@@ -125,43 +114,27 @@ def stock_job(app: Application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Shein Verse MEN Stock Bot*\n\n"
-        "⚡ Super fast stock alerts\n"
-        "👕 MEN section only\n\n"
-        "Use buttons below 👇",
-        parse_mode="Markdown",
-        reply_markup=main_keyboard(),
+        "🤖 Shein Verse MEN Stock Bot\n\nReady 🚀",
+        reply_markup=keyboard()
     )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global alerts_enabled
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
-    if query.data == "on":
+    if q.data == "on":
         alerts_enabled = True
-        await query.edit_message_text(
-            "🟢 *Stock Alerts ENABLED*",
-            parse_mode="Markdown",
-            reply_markup=main_keyboard(),
-        )
+        await q.edit_message_text("🟢 Alerts ON", reply_markup=keyboard())
 
-    elif query.data == "off":
+    elif q.data == "off":
         alerts_enabled = False
-        await query.edit_message_text(
-            "🔴 *Stock Alerts DISABLED*",
-            parse_mode="Markdown",
-            reply_markup=main_keyboard(),
-        )
+        await q.edit_message_text("🔴 Alerts OFF", reply_markup=keyboard())
 
-    elif query.data == "status":
-        status = "🟢 ON" if alerts_enabled else "🔴 OFF"
-        await query.edit_message_text(
-            f"📊 *Bot Status*\n\n"
-            f"Alerts: {status}\n"
-            f"Bot: 🟢 Alive & Running",
-            parse_mode="Markdown",
-            reply_markup=main_keyboard(),
+    elif q.data == "status":
+        await q.edit_message_text(
+            f"📊 Status\nAlerts: {'ON' if alerts_enabled else 'OFF'}\nBot: Alive ✅",
+            reply_markup=keyboard()
         )
 
 # ================= MAIN =================
@@ -170,13 +143,13 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(buttons))
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(stock_job, "interval", seconds=CHECK_INTERVAL, args=[app])
     scheduler.start()
 
-    logging.info("✅ Bot started (Railway stable, single instance)")
+    logging.info("Bot running safely (403 fixed)")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
