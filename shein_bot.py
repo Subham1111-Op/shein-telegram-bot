@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import requests
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -13,105 +14,129 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+
 # ================= CONFIG =================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 
-if not BOT_TOKEN or not CHAT_ID:
-    raise RuntimeError("BOT_TOKEN or CHAT_ID not set")
+CHECK_INTERVAL = 10  # seconds
 
-SHEIN_API = (
-    "https://www.sheinindia.in/api/category/"
-    "sverse-5939-37961"
-    "?fields=SITE"
-    "&currentPage=0"
-    "&pageSize=40"
-    "&format=json"
-    "&query=%3Arelevance%3Agenderfilter%3AMen"
-    "&facets=genderfilter%3AMen"
+# SHEIN VERSE MEN API (MEN ONLY)
+SHEIN_MEN_API = (
+    "https://www.sheinindia.in/api/category/sverse-5939-37961"
+    "?fields=SITE&currentPage=0&pageSize=40&format=json"
 )
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
 }
 
-CHECK_INTERVAL = 10  # seconds
-alerts_enabled = True
+# ================= LOGGING =================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+# ================= STATE =================
+
+alerts_on = False
 seen_items = set()
 
-logging.basicConfig(level=logging.INFO)
+# ================= BOT COMMANDS =================
 
-# ================= BOT UI =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🟢 Stock Alerts ON", callback_data="on")],
         [InlineKeyboardButton("🔴 Stock Alerts OFF", callback_data="off")],
         [InlineKeyboardButton("📡 Bot Status", callback_data="status")],
     ]
+
     await update.message.reply_text(
-        "🔥 Shein Verse MEN Stock Bot Started",
+        "🤖 *Shein Verse MEN Stock Bot Ready!*",
         reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
     )
 
+
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global alerts_enabled
+    global alerts_on
+
     query = update.callback_query
     await query.answer()
 
     if query.data == "on":
-        alerts_enabled = True
-        await query.edit_message_text("🟢 Stock alerts ENABLED")
+        alerts_on = True
+        await query.edit_message_text("🟢 *Stock Alerts TURNED ON!*", parse_mode="Markdown")
 
     elif query.data == "off":
-        alerts_enabled = False
-        await query.edit_message_text("🔴 Stock alerts DISABLED")
+        alerts_on = False
+        await query.edit_message_text("🔴 *Stock Alerts TURNED OFF!*", parse_mode="Markdown")
 
     elif query.data == "status":
-        status = "ON" if alerts_enabled else "OFF"
-        await query.edit_message_text(f"📡 Bot is ALIVE\nAlerts: {status}")
+        status_text = (
+            f"📡 *Bot Status*\n\n"
+            f"Status: 🟢 RUNNING\n"
+            f"Alerts: {'ON' if alerts_on else 'OFF'}\n"
+            f"Seen Items: {len(seen_items)}"
+        )
+        await query.edit_message_text(status_text, parse_mode="Markdown")
+
 
 # ================= STOCK CHECK =================
-async def check_stock(context: ContextTypes.DEFAULT_TYPE):
-    global seen_items, alerts_enabled
-    if not alerts_enabled:
+
+async def check_stock(bot):
+    global alerts_on
+
+    if not alerts_on:
         return
 
     try:
-        r = requests.get(SHEIN_API, headers=HEADERS, timeout=15)
+        r = requests.get(SHEIN_MEN_API, headers=HEADERS, timeout=15)
         data = r.json()
 
-        products = data.get("info", {}).get("products", [])
+        items = data.get("info", {}).get("products", [])
 
-        for p in products:
-            goods_id = p.get("goods_id")
-            name = p.get("goods_name", "Item")
-            url = "https://www.shein.in/" + p.get("goods_url", "")
-            stock = p.get("stock", 0)
+        for item in items:
+            item_id = item.get("goods_id")
+            name = item.get("goods_name")
+            stock = item.get("stock", 0)
+            url = "https://www.sheinindia.in/" + item.get("goods_url", "")
 
-            if stock > 0 and goods_id not in seen_items:
-                seen_items.add(goods_id)
+            if stock > 0 and item_id not in seen_items:
+                seen_items.add(item_id)
 
                 msg = (
-                    "🔥 *MEN STOCK AVAILABLE*\n\n"
-                    f"*{name}*\n"
-                    f"Stock: {stock}\n"
-                    f"[Open Product]({url})"
+                    f"🔥 *MEN ITEM IN STOCK!*\n\n"
+                    f"👕 {name}\n"
+                    f"📦 Stock: {stock}\n"
+                    f"🔗 {url}"
                 )
 
-                await context.bot.send_message(
+                await bot.send_message(
                     chat_id=CHAT_ID,
                     text=msg,
                     parse_mode="Markdown",
-                    disable_web_page_preview=False,
                 )
 
     except Exception as e:
         logging.error(f"Stock check error: {e}")
 
+
 # ================= MAIN =================
+
 async def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN not set")
+
+    if not CHAT_ID:
+        raise RuntimeError("CHAT_ID not set")
+
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -123,7 +148,7 @@ async def main():
         "interval",
         seconds=CHECK_INTERVAL,
         args=[application.bot],
-        max_instances=1,   # 🔥 VERY IMPORTANT (conflict fix)
+        max_instances=1,
         coalesce=True,
     )
     scheduler.start()
@@ -132,9 +157,10 @@ async def main():
     await application.start()
     await application.bot.initialize()
 
-    logging.info("🤖 Bot started safely (single instance)")
+    logging.info("🤖 Bot started safely (Railway stable)")
 
-    await application.stop()  # keeps process alive safely
+    # 🔥 KEEP PROCESS ALIVE
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
