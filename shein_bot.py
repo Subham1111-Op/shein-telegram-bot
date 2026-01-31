@@ -1,176 +1,171 @@
 import os
-import aiohttp
-import logging
-from typing import Set
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+import asyncio
+import requests
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
 )
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ================== CONFIG ==================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-CHAT_ID = 7855120289   # ✅ MANUAL CHAT ID
+if not BOT_TOKEN or not CHAT_ID:
+    raise RuntimeError("BOT_TOKEN or CHAT_ID not set in environment")
 
-BASE_URL = "https://www.sheinindia.in/api/category/sverse-5939-37961"
+MEN_API_URL = (
+    "https://www.sheinindia.in/api/category/"
+    "sverse-5939-37961"
+    "?fields=SITE"
+    "&currentPage=0"
+    "&pageSize=40"
+    "&format=json"
+    "&query=%3Arelevance%3Agenderfilter%3AMen"
+    "&facets=genderfilter%3AMen"
+    "&customerType=New"
+    "&platform=Desktop"
+)
 
-PAGES_TO_SCAN = 5      # ✅ MORE COVERAGE
-CHECK_INTERVAL = 10   # ✅ MORE STABLE
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
+}
 
-ALERTS_ON = False
+SCAN_INTERVAL = 10  # seconds
+# ============================================
 
-seen_products: Set[str] = set()
-seen_instock: Set[str] = set()
+alerts_on = False
+seen_items = set()
+scheduler = AsyncIOScheduler()
 
-logging.basicConfig(level=logging.INFO)
+# ================== HELPERS ==================
+def fetch_men_items():
+    try:
+        r = requests.get(MEN_API_URL, headers=HEADERS, timeout=15)
+        data = r.json()
+        return data.get("info", {}).get("products", [])
+    except Exception:
+        return []
 
-# ================== UI ==================
 
-def build_menu():
+def extract_stock_info(product):
+    sizes = []
+    for sku in product.get("skus", []):
+        if sku.get("stock", 0) > 0:
+            size = sku.get("attrValue", "Unknown")
+            sizes.append(size)
+    return sizes
+
+
+async def send_alert(app, text):
+    await app.bot.send_message(chat_id=CHAT_ID, text=text)
+
+# ================== STOCK JOB ==================
+async def stock_job(app):
+    global seen_items
+
+    if not alerts_on:
+        return
+
+    products = fetch_men_items()
+
+    for p in products:
+        pid = p.get("goods_id")
+        if not pid:
+            continue
+
+        sizes = extract_stock_info(p)
+        if not sizes:
+            continue
+
+        # New stock or new item
+        if pid not in seen_items:
+            seen_items.add(pid)
+            title = p.get("goods_name", "Men Item")
+            link = f"https://www.sheinindia.in/{p.get('goods_url', '')}"
+
+            msg = (
+                "🔥 MEN STOCK ALERT\n\n"
+                f"🧥 Item: {title}\n"
+                f"📏 Sizes: {', '.join(sizes)}\n"
+                f"🔗 Link: {link}"
+            )
+            await send_alert(app, msg)
+
+# ================== COMMANDS ==================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🟢 Stock Alerts ON", callback_data="on")],
         [InlineKeyboardButton("🔴 Stock Alerts OFF", callback_data="off")],
         [InlineKeyboardButton("📡 Bot Status", callback_data="status")],
     ]
-    return InlineKeyboardMarkup(keyboard)
-
-# ================== API ==================
-
-async def fetch_page(session, page: int):
-    params = {
-        "fields": "SITE",
-        "currentPage": page,
-        "pageSize": 40,
-        "format": "json",
-        "query": ":relevance:genderfilter:Men",
-        "facets": "genderfilter:Men",
-        "platform": "Desktop",
-    }
-    async with session.get(BASE_URL, params=params, timeout=20) as resp:
-        return await resp.json()
-
-# ================== BOT COMMANDS ==================
-
-async def start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Shein Verse PRO FAST Bot Ready!\nChoose option:",
-        reply_markup=build_menu()
+        "🤖 Shein Verse MEN Stock Bot Ready!\nChoose option:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-async def button_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    global ALERTS_ON
+
+async def test_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🧪 TEST ALERT\nBot is working perfectly ✅"
+    )
+
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global alerts_on
     query = update.callback_query
     await query.answer()
 
     if query.data == "on":
-        ALERTS_ON = True
-        await query.edit_message_text(
-            "🟢 SUPER FAST Stock Alerts TURNED ON!",
-            reply_markup=build_menu()
-        )
+        alerts_on = True
+        await query.edit_message_text("🟢 Stock Alerts TURNED ON")
 
     elif query.data == "off":
-        ALERTS_ON = False
-        await query.edit_message_text(
-            "🔴 Stock Alerts TURNED OFF!",
-            reply_markup=build_menu()
-        )
+        alerts_on = False
+        await query.edit_message_text("🔴 Stock Alerts TURNED OFF")
 
     elif query.data == "status":
         await query.edit_message_text(
-            f"🤖 Bot Status:\n"
-            f"Status: 🟢 ALIVE & RUNNING\n"
-            f"Stock Alerts: {'ON' if ALERTS_ON else 'OFF'}\n"
-            f"Seen Items: {len(seen_products)}",
-            reply_markup=build_menu()
+            f"📡 Bot Status\n\n"
+            f"Status: ALIVE ✅\n"
+            f"Stock Alerts: {'ON' if alerts_on else 'OFF'}\n"
+            f"Seen Items: {len(seen_items)}"
         )
 
-# ================== STOCK SCANNER ==================
-
-async def stock_job(context: ContextTypes.DEFAULT_TYPE):
-    global ALERTS_ON, seen_products, seen_instock
-
-    if not ALERTS_ON:
-        return
-
-    bot = context.application.bot
-
-    if not hasattr(context.application, "http_session"):
-        context.application.http_session = aiohttp.ClientSession()
-
-    session = context.application.http_session
-
-    try:
-        for page in range(PAGES_TO_SCAN):
-            data = await fetch_page(session, page)
-            products = data.get("info", {}).get("products", [])
-
-            for p in products:
-                product_id = str(p.get("goods_id"))
-                name = p.get("goods_name", "Unknown")
-                price = p.get("salePrice", "")
-                url = p.get("goods_url", "")
-
-                # ---------- NEW PRODUCT ----------
-                if product_id not in seen_products:
-                    seen_products.add(product_id)
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=(
-                            "🆕 NEW PRODUCT ADDED!\n\n"
-                            f"👕 {name}\n"
-                            f"💰 {price}\n"
-                            f"🔗 {url}"
-                        )
-                    )
-
-                # ---------- STOCK CHECK (ANY SIZE) ----------
-                in_stock = False
-
-                if isinstance(p.get("stock"), int) and p.get("stock", 0) > 0:
-                    in_stock = True
-
-                if p.get("isSoldOut") is False:
-                    in_stock = True
-
-                if in_stock and product_id not in seen_instock:
-                    seen_instock.add(product_id)
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=(
-                            "🔥 STOCK AVAILABLE!\n\n"
-                            f"👕 {name}\n"
-                            f"💰 {price}\n"
-                            f"🔗 {url}\n\n"
-                            "⚡ ANY SIZE STOCK DETECTED!"
-                        )
-                    )
-
-    except Exception as e:
-        logging.exception("Stock job error")
-        await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Scanner error: {e}")
-
-# ================== MAIN (STABLE) ==================
-
-def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN not set in environment")
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# ================== MAIN ==================
+async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("test_alert", test_alert))
+    app.add_handler(CallbackQueryHandler(buttons))
 
-    app.job_queue.run_repeating(stock_job, interval=CHECK_INTERVAL, first=5)
+    scheduler.add_job(
+        stock_job,
+        "interval",
+        seconds=SCAN_INTERVAL,
+        args=[app],
+        max_instances=1,
+    )
+    scheduler.start()
 
-    print("🚀 Shein Verse PRO FAST Bot started")
+    await app.initialize()
+    await app.start()
+    await app.bot.send_message(
+        chat_id=CHAT_ID,
+        text="🤖 Bot restarted successfully\nStatus: ALIVE\nAlerts: OFF",
+    )
+    await app.updater.start_polling()
+    await asyncio.Event().wait()
 
-    app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
