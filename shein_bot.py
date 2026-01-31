@@ -1,17 +1,21 @@
 import os
-import time
 import requests
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    CallbackQueryHandler,
+    CallbackContext,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
-CHECK_INTERVAL = 5  # ⚡ fastest SAFE speed
-alerts_enabled = False
+CHECK_INTERVAL = 3  # ⚡ ultra fast (safe)
+ALERTS_ENABLED = True
 
 SEEN_ITEMS = set()
 STOCK_ITEMS = set()
@@ -21,7 +25,7 @@ SHEIN_API = "https://www.sheinindia.in/api/category/sverse-5939-37961"
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
-    "Referer": "https://www.sheinindia.in/"
+    "Referer": "https://www.sheinindia.in/",
 }
 
 PARAMS = {
@@ -41,58 +45,54 @@ def keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🟢 Stock Alerts ON", callback_data="on")],
         [InlineKeyboardButton("🔴 Stock Alerts OFF", callback_data="off")],
-        [InlineKeyboardButton("📊 Bot Status", callback_data="status")]
+        [InlineKeyboardButton("📊 Bot Status", callback_data="status")],
     ])
 
+# ================= COMMANDS =================
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "🔥 *Shein Verse MEN Pro Bot*\n\n"
-        "✅ Existing stock alerts\n"
-        "✅ New item alerts\n"
-        "✅ Super fast scan\n\n"
+        "🚀 *SHEIN VERSE MEN STOCK BOT LIVE*\n\n"
+        "⚡ Ultra-fast scanning enabled\n"
+        "📦 Existing + New stock alerts\n\n"
         "Controls 👇",
         parse_mode="Markdown",
-        reply_markup=keyboard()
+        reply_markup=keyboard(),
     )
 
 def buttons(update: Update, context: CallbackContext):
-    global alerts_enabled
+    global ALERTS_ENABLED
     q = update.callback_query
     q.answer()
 
     if q.data == "on":
-        alerts_enabled = True
-        q.edit_message_text("🟢 Alerts ENABLED", reply_markup=keyboard())
+        ALERTS_ENABLED = True
+        q.edit_message_text("🟢 *Stock Alerts ENABLED*", parse_mode="Markdown", reply_markup=keyboard())
 
     elif q.data == "off":
-        alerts_enabled = False
-        q.edit_message_text("🔴 Alerts DISABLED", reply_markup=keyboard())
+        ALERTS_ENABLED = False
+        q.edit_message_text("🔴 *Stock Alerts DISABLED*", parse_mode="Markdown", reply_markup=keyboard())
 
     elif q.data == "status":
         q.edit_message_text(
             f"📊 *Bot Status*\n\n"
-            f"Alerts: {'ON 🟢' if alerts_enabled else 'OFF 🔴'}\n"
-            f"Seen Items: {len(SEEN_ITEMS)}\n"
-            f"In Stock: {len(STOCK_ITEMS)}",
+            f"🟢 Alive: YES\n"
+            f"🔔 Alerts: {'ON' if ALERTS_ENABLED else 'OFF'}\n"
+            f"👕 Items Seen: {len(SEEN_ITEMS)}\n"
+            f"📦 In Stock Tracked: {len(STOCK_ITEMS)}",
             parse_mode="Markdown",
-            reply_markup=keyboard()
+            reply_markup=keyboard(),
         )
 
-# ================= CORE =================
+# ================= CORE LOGIC =================
 def scan_stock():
-    if not alerts_enabled:
+    if not ALERTS_ENABLED:
         return
 
     try:
-        r = requests.get(
-            SHEIN_API,
-            headers=HEADERS,
-            params=PARAMS,
-            timeout=10
-        )
+        r = requests.get(SHEIN_API, headers=HEADERS, params=PARAMS, timeout=8)
 
         if r.status_code != 200:
-            log.warning("Shein blocked (403)")
+            log.warning("Shein blocked / error")
             return
 
         products = r.json().get("info", {}).get("products", [])
@@ -100,8 +100,8 @@ def scan_stock():
         for p in products:
             pid = p.get("goods_id")
             name = p.get("goods_name")
-            stock = p.get("availableStock", 0)
             url = "https://www.sheinindia.in/" + p.get("goods_url", "")
+            stock = p.get("availableStock", 0)
 
             if not pid:
                 continue
@@ -109,42 +109,46 @@ def scan_stock():
             # NEW ITEM
             if pid not in SEEN_ITEMS:
                 SEEN_ITEMS.add(pid)
-                send_msg(
-                    f"🆕 *NEW VERSE MEN ITEM*\n\n"
-                    f"*{name}*\n\n"
-                    f"🔗 {url}"
-                )
+                if stock > 0:
+                    send_alert(
+                        f"🆕 *NEW MEN ITEM IN STOCK*\n\n"
+                        f"*{name}*\n"
+                        f"📦 Stock: {stock}\n\n"
+                        f"🔗 {url}"
+                    )
+                    STOCK_ITEMS.add(pid)
 
-            # STOCK AVAILABLE
-            if stock > 0 and pid not in STOCK_ITEMS:
+            # RESTOCK
+            elif stock > 0 and pid not in STOCK_ITEMS:
                 STOCK_ITEMS.add(pid)
-                send_msg(
-                    f"⚡ *STOCK LIVE*\n\n"
+                send_alert(
+                    f"🔥 *RESTOCK ALERT*\n\n"
                     f"*{name}*\n"
                     f"📦 Stock: {stock}\n\n"
                     f"🔗 {url}"
                 )
 
-            # RESET IF OOS
-            if stock == 0 and pid in STOCK_ITEMS:
+            # OUT OF STOCK RESET
+            elif stock == 0 and pid in STOCK_ITEMS:
                 STOCK_ITEMS.remove(pid)
 
     except Exception as e:
         log.error(f"Scan error: {e}")
 
-def send_msg(text):
+def send_alert(text):
     try:
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json={
                 "chat_id": CHAT_ID,
                 "text": text,
-                "parse_mode": "Markdown"
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": False,
             },
-            timeout=10
+            timeout=10,
         )
-    except:
-        pass
+    except Exception as e:
+        log.error(f"Telegram error: {e}")
 
 # ================= MAIN =================
 def main():
@@ -158,8 +162,10 @@ def main():
     scheduler.add_job(scan_stock, "interval", seconds=CHECK_INTERVAL)
     scheduler.start()
 
-    log.info("✅ BOT RUNNING (PRO MODE)")
+    # 🔥 Deploy hote hi message
+    send_alert("✅ *Shein Verse MEN Bot Deployed & Alive*\n\n⚡ Ultra-fast stock scanning started")
 
+    log.info("🚀 BOT RUNNING (ULTRA FAST MODE)")
     updater.start_polling(drop_pending_updates=True)
     updater.idle()
 
