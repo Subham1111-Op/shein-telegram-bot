@@ -1,161 +1,167 @@
 import os
+import time
+import requests
 import logging
-import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# ================= ENV =================
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
-if not BOT_TOKEN or not CHAT_ID:
-    raise RuntimeError("BOT_TOKEN / CHAT_ID missing")
+CHECK_INTERVAL = 5  # ⚡ fastest SAFE speed
+alerts_enabled = False
 
-# ================= CONFIG =================
-CHECK_INTERVAL = 5  # seconds (super fast)
+SEEN_ITEMS = set()
+STOCK_ITEMS = set()
 
-SHEIN_API = (
-    "https://www.sheinindia.in/api/category/"
-    "sverse-5939-37961"
-    "?fields=SITE&currentPage=0&pageSize=40&format=json&query=:relevance"
-)
+SHEIN_API = "https://www.sheinindia.in/api/category/sverse-5939-37961"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Android)",
+    "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
-    "Referer": "https://www.sheinindia.in/",
+    "Referer": "https://www.sheinindia.in/"
 }
 
-# ================= STATE =================
-seen_items = set()
-last_alerts = []
+PARAMS = {
+    "fields": "SITE",
+    "currentPage": 0,
+    "pageSize": 40,
+    "format": "json",
+    "query": ":relevance",
+}
 
+# ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("SHEIN-VERSE-BOT")
 
-# ================= BUTTONS =================
+# ================= UI =================
 def keyboard():
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔍 Check Now", callback_data="check")],
-            [
-                InlineKeyboardButton("📦 Last Alerts", callback_data="last"),
-                InlineKeyboardButton("⚙️ Status", callback_data="status"),
-            ],
-        ]
-    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Stock Alerts ON", callback_data="on")],
+        [InlineKeyboardButton("🔴 Stock Alerts OFF", callback_data="off")],
+        [InlineKeyboardButton("📊 Bot Status", callback_data="status")]
+    ])
 
-# ================= START =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔥 *SHEIN VERSE MEN – COUPON BOT*\n\n"
-        "✅ Only MEN items\n"
-        "🎟️ Coupon / price-drop detect\n"
-        "⚡ Super fast alerts\n\n"
-        "Use buttons 👇",
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "🔥 *Shein Verse MEN Pro Bot*\n\n"
+        "✅ Existing stock alerts\n"
+        "✅ New item alerts\n"
+        "✅ Super fast scan\n\n"
+        "Controls 👇",
         parse_mode="Markdown",
-        reply_markup=keyboard(),
+        reply_markup=keyboard()
     )
 
-# ================= BUTTON HANDLER =================
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def buttons(update: Update, context: CallbackContext):
+    global alerts_enabled
     q = update.callback_query
-    await q.answer()
+    q.answer()
 
-    if q.data == "check":
-        await q.edit_message_text("🔍 Checking stock…", reply_markup=keyboard())
-        await check_stock(context)
+    if q.data == "on":
+        alerts_enabled = True
+        q.edit_message_text("🟢 Alerts ENABLED", reply_markup=keyboard())
 
-    elif q.data == "last":
-        text = "📦 *No alerts yet*"
-        if last_alerts:
-            text = "📦 *Last Alerts*\n\n" + "\n".join(last_alerts[-5:])
-        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard())
+    elif q.data == "off":
+        alerts_enabled = False
+        q.edit_message_text("🔴 Alerts DISABLED", reply_markup=keyboard())
 
     elif q.data == "status":
-        await q.edit_message_text(
-            f"⚙️ *Bot Status*\n\n"
-            f"🟢 Running\n"
-            f"⏱ Interval: {CHECK_INTERVAL}s\n"
-            f"📦 Alerts sent: {len(seen_items)}",
+        q.edit_message_text(
+            f"📊 *Bot Status*\n\n"
+            f"Alerts: {'ON 🟢' if alerts_enabled else 'OFF 🔴'}\n"
+            f"Seen Items: {len(SEEN_ITEMS)}\n"
+            f"In Stock: {len(STOCK_ITEMS)}",
             parse_mode="Markdown",
-            reply_markup=keyboard(),
+            reply_markup=keyboard()
         )
 
-# ================= COUPON LOGIC =================
-def has_coupon(p: dict) -> bool:
-    sp = p.get("salePrice")
-    op = p.get("originalPrice") or p.get("listPrice")
-    try:
-        return sp and op and float(sp) < float(op)
-    except Exception:
-        return False
+# ================= CORE =================
+def scan_stock():
+    if not alerts_enabled:
+        return
 
-# ================= STOCK CHECK =================
-async def check_stock(context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=10) as client:
-            r = await client.get(SHEIN_API)
+        r = requests.get(
+            SHEIN_API,
+            headers=HEADERS,
+            params=PARAMS,
+            timeout=10
+        )
 
         if r.status_code != 200:
+            log.warning("Shein blocked (403)")
             return
 
         products = r.json().get("info", {}).get("products", [])
 
         for p in products:
             pid = p.get("goods_id")
-            stock = p.get("stock", 0)
+            name = p.get("goods_name")
+            stock = p.get("availableStock", 0)
+            url = "https://www.sheinindia.in/" + p.get("goods_url", "")
 
-            if not pid or stock <= 0:
+            if not pid:
                 continue
 
-            if not has_coupon(p):
-                continue
+            # NEW ITEM
+            if pid not in SEEN_ITEMS:
+                SEEN_ITEMS.add(pid)
+                send_msg(
+                    f"🆕 *NEW VERSE MEN ITEM*\n\n"
+                    f"*{name}*\n\n"
+                    f"🔗 {url}"
+                )
 
-            if pid in seen_items:
-                continue
+            # STOCK AVAILABLE
+            if stock > 0 and pid not in STOCK_ITEMS:
+                STOCK_ITEMS.add(pid)
+                send_msg(
+                    f"⚡ *STOCK LIVE*\n\n"
+                    f"*{name}*\n"
+                    f"📦 Stock: {stock}\n\n"
+                    f"🔗 {url}"
+                )
 
-            seen_items.add(pid)
-
-            name = p.get("goods_name", "Men Item")
-            price = p.get("salePrice", "")
-            link = "https://www.sheinindia.in/" + p.get("goods_url", "")
-
-            msg = (
-                "🎟️ *COUPON ITEM LIVE*\n\n"
-                f"👕 {name}\n"
-                f"💰 {price}\n"
-                f"📦 In Stock\n"
-                f"🔗 {link}"
-            )
-
-            last_alerts.append(f"• {name}")
-            await context.bot.send_message(
-                chat_id=CHAT_ID, text=msg, parse_mode="Markdown"
-            )
+            # RESET IF OOS
+            if stock == 0 and pid in STOCK_ITEMS:
+                STOCK_ITEMS.remove(pid)
 
     except Exception as e:
-        logging.error(f"Stock error: {e}")
+        log.error(f"Scan error: {e}")
 
-# ================= AUTO JOB =================
-async def auto_job(context: ContextTypes.DEFAULT_TYPE):
-    await check_stock(context)
+def send_msg(text):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "Markdown"
+            },
+            timeout=10
+        )
+    except:
+        pass
 
 # ================= MAIN =================
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(buttons))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CallbackQueryHandler(buttons))
 
-    app.job_queue.run_repeating(auto_job, interval=CHECK_INTERVAL, first=3)
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(scan_stock, "interval", seconds=CHECK_INTERVAL)
+    scheduler.start()
 
-    logging.info("✅ Bot running safely (Railway compatible)")
-    app.run_polling(drop_pending_updates=True)
+    log.info("✅ BOT RUNNING (PRO MODE)")
+
+    updater.start_polling(drop_pending_updates=True)
+    updater.idle()
 
 if __name__ == "__main__":
     main()
